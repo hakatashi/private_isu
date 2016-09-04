@@ -4,6 +4,7 @@ use \Psr\Http\Message\ResponseInterface as Response;
 
 require 'vendor/autoload.php';
 
+/*
 $_SERVER += ['PATH_INFO' => $_SERVER['REQUEST_URI']];
 $_SERVER['SCRIPT_NAME'] = '/' . basename($_SERVER['SCRIPT_FILENAME']);
 $file = dirname(__DIR__) . '/public' . $_SERVER['REQUEST_URI'];
@@ -19,8 +20,9 @@ if (is_file($file)) {
         echo file_get_contents($file); exit;
     }
 }
+*/
 
-const POSTS_PER_PAGE = 20;
+const POSTS_PER_PAGE = 22;
 const UPLOAD_LIMIT = 10 * 1024 * 1024;
 
 $config = [
@@ -37,8 +39,8 @@ $config = [
 ];
 
 // memcached session
-ini_set('session.save_handler', 'memcached');
-ini_set('session.save_path', '127.0.0.1:11211');
+//ini_set('session.save_handler', 'memcached');
+//ini_set('session.save_path', '127.0.0.1:11211');
 
 session_start();
 
@@ -111,11 +113,18 @@ $container['helper'] = function ($c) {
         }
 
         public function get_session_user() {
+            if (isset($_SESSION['user']))
+                return $_SESSION['user'];
+            else
+                return null;
+
+            /*
             if (isset($_SESSION['user'], $_SESSION['user']['id'])) {
                 return $this->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $_SESSION['user']['id']);
             } else {
                 return null;
             }
+            */
         }
 
         public function make_posts(array $results, $options = []) {
@@ -125,7 +134,10 @@ $container['helper'] = function ($c) {
             $posts = [];
             foreach ($results as $post) {
                 $post['comment_count'] = $this->fetch_first('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?', $post['id'])['count'];
-                $query = 'SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC';
+
+                //$query = 'SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC';
+                //$query = 'SELECT `comments`.`comment`, `users`.`account_name` FROM `comments` INNER JOIN `users` ON `comments`.`user_id` = `users`.`id` WHERE `comments`.`post_id` = ?';
+                $query = 'SELECT comment, username as account_name FROM `comments` WHERE `post_id` = ?';
                 if (!$all_comments) {
                     $query .= ' LIMIT 3';
                 }
@@ -133,17 +145,21 @@ $container['helper'] = function ($c) {
                 $ps = $this->db()->prepare($query);
                 $ps->execute([$post['id']]);
                 $comments = $ps->fetchAll(PDO::FETCH_ASSOC);
+
+                /*
                 foreach ($comments as &$comment) {
                     $comment['user'] = $this->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $comment['user_id']);
                 }
                 unset($comment);
+                */
+
                 $post['comments'] = array_reverse($comments);
 
                 $post['user'] = $this->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $post['user_id']);
                 if ($post['user']['del_flg'] == 0) {
                     $posts[] = $post;
                 }
-                if (count($posts) >= POSTS_PER_PAGE) {
+                if (count($posts) >= POSTS_PER_PAGE - 2) {
                     break;
                 }
             }
@@ -189,8 +205,9 @@ function validate_user($account_name, $password) {
 
 function digest($src) {
     // opensslのバージョンによっては (stdin)= というのがつくので取る
-    $src = escapeshellarg($src);
-    return trim(`printf "%s" {$src} | openssl dgst -sha512 | sed 's/^.*= //'`);
+    //$src = escapeshellarg($src);
+    //return trim(`printf "%s" {$src} | openssl dgst -sha512 | sed 's/^.*= //'`);
+    return hash('sha512', $src);
 }
 
 function calculate_salt($account_name) {
@@ -228,9 +245,12 @@ $app->post('/login', function (Request $request, Response $response) {
     $user = $this->get('helper')->try_login($params['account_name'], $params['password']);
 
     if ($user) {
+        /*
         $_SESSION['user'] = [
           'id' => $user['id'],
         ];
+        */
+        $_SESSION['user'] = $user;
         return redirect($response, '/', 302);
     } else {
         $this->flash->addMessage('notice', 'アカウント名かパスワードが間違っています');
@@ -275,9 +295,14 @@ $app->post('/register', function (Request $request, Response $response) {
         $account_name,
         calculate_passhash($account_name, $password)
     ]);
+
+    /*
     $_SESSION['user'] = [
         'id' => $db->lastInsertId(),
     ];
+    */
+
+    $_SESSION['user'] = $this->get('helper')->fetch_first('SELECT * FROM users WHERE `id` = ?', $db->lastInsertId());
     return redirect($response, '/', 302);
 });
 
@@ -290,7 +315,9 @@ $app->get('/', function (Request $request, Response $response) {
     $me = $this->get('helper')->get_session_user();
 
     $db = $this->get('db');
-    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC');
+    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` LIMIT ' . POSTS_PER_PAGE);
+    //$ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `id` DESC LIMIT ' . POSTS_PER_PAGE);
+    //$ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC LIMIT ' . POSTS_PER_PAGE);
     $ps->execute();
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
     $posts = $this->get('helper')->make_posts($results);
@@ -301,9 +328,23 @@ $app->get('/', function (Request $request, Response $response) {
 $app->get('/posts', function (Request $request, Response $response) {
     $params = $request->getParams();
     $max_created_at = $params['max_created_at'] ?? null;
+    $max_created_at = null;
+
     $db = $this->get('db');
-    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC');
+    if ($max_created_at === null) {
+        $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `id` DESC LIMIT ' . POSTS_PER_PAGE);
+    	$ps->execute();
+    } else {
+    	$ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `id` <= ? ORDER BY `id` DESC LIMIT ' . POSTS_PER_PAGE);
+	$ps->execute([$max_created_at]);
+    }
+
+    /*
+    $db = $this->get('db');
+    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC LIMIT ' . POSTS_PER_PAGE);
     $ps->execute([$max_created_at === null ? null : $max_created_at]);
+    */
+
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
     $posts = $this->get('helper')->make_posts($results);
 
@@ -311,11 +352,15 @@ $app->get('/posts', function (Request $request, Response $response) {
 });
 
 $app->get('/posts/{id}', function (Request $request, Response $response, $args) {
+    /*
     $db = $this->get('db');
     $ps = $db->prepare('SELECT * FROM `posts` WHERE `id` = ?');
     $ps->execute([$args['id']]);
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
-    $posts = $this->get('helper')->make_posts($results, ['all_comments' => true]);
+    */
+
+    $post = $this->get('helper')->fetch_first('SELECT * FROM `posts` WHERE `id` = ?', $args['id']);
+    $posts = $this->get('helper')->make_posts([$post], ['all_comments' => true]);
 
     if (count($posts) == 0) {
         return $response->withStatus(404)->write('404');
@@ -324,7 +369,6 @@ $app->get('/posts/{id}', function (Request $request, Response $response, $args) 
     $post = $posts[0];
 
     $me = $this->get('helper')->get_session_user();
-
     return $this->view->render($response, 'post.php', ['post' => $post, 'me' => $me]);
 });
 
@@ -342,33 +386,41 @@ $app->post('/', function (Request $request, Response $response) {
 
     if ($_FILES['file']) {
         $mime = '';
+        $ext = '';
         // 投稿のContent-Typeからファイルのタイプを決定する
         if (strpos($_FILES['file']['type'], 'jpeg') !== false) {
             $mime = 'image/jpeg';
+	    $ext = 'jpg';
         } elseif (strpos($_FILES['file']['type'], 'png') !== false) {
             $mime = 'image/png';
+	    $ext = 'png';
         } elseif (strpos($_FILES['file']['type'], 'gif') !== false) {
             $mime = 'image/gif';
+	    $ext = 'gif';
         } else {
             $this->flash->addMessage('notice', '投稿できる画像形式はjpgとpngとgifだけです');
             return redirect($response, '/', 302);
         }
 
-        if (strlen(file_get_contents($_FILES['file']['tmp_name'])) > UPLOAD_LIMIT) {
+        $data = file_get_contents($_FILES['file']['tmp_name']);
+        if (strlen($data) > UPLOAD_LIMIT) {
             $this->flash->addMessage('notice', 'ファイルサイズが大きすぎます');
             return redirect($response, '/', 302);
         }
 
         $db = $this->get('db');
-        $query = 'INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)';
+        //$query = 'INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)';
+        $query = 'INSERT INTO `posts` (`user_id`, `mime`, `body`) VALUES (?,?,?)';
         $ps = $db->prepare($query);
         $ps->execute([
           $me['id'],
           $mime,
-          file_get_contents($_FILES['file']['tmp_name']),
+          //$data,
           $params['body'],
         ]);
         $pid = $db->lastInsertId();
+
+	file_put_contents(dirname(__DIR__) . '/public/image/' . $pid . '.' . $ext, $data);
         return redirect($response, "/posts/{$pid}", 302);
     } else {
         $this->flash->addMessage('notice', '画像が必須です');
@@ -377,6 +429,8 @@ $app->post('/', function (Request $request, Response $response) {
 });
 
 $app->get('/image/{id}.{ext}', function (Request $request, Response $response, $args) {
+    return $response->withStatus(500)->write('500');
+    /*
     if ($args['id'] == 0) {
         return '';
     }
@@ -390,6 +444,21 @@ $app->get('/image/{id}.{ext}', function (Request $request, Response $response, $
                         ->write($post['imgdata']);
     }
     return $response->withStatus(404)->write('404');
+    */
+});
+
+$app->get('/flush/{id}', function (Request $request, Response $response, $args) {
+    /*
+    $db = $this->get('db');
+    $ps = $db->prepare('SELECT `id`, `mime`, `imgdata` FROM `posts` LIMIT 50 OFFSET ' . $args['id']);
+    $ps->execute();
+    $results = $ps->fetchAll(PDO::FETCH_ASSOC);
+    
+    foreach ($results as $result) {
+        file_put_contents(dirname(__DIR__) . '/public' . image_url($result), $result['imgdata']);
+    }
+    */
+    return $response->withStatus(200)->write(200);
 });
 
 $app->post('/comment', function (Request $request, Response $response) {
@@ -410,11 +479,12 @@ $app->post('/comment', function (Request $request, Response $response) {
     }
     $post_id = $params['post_id'];
 
-    $query = 'INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)';
+    $query = 'INSERT INTO `comments` (`post_id`, `user_id`, `username`, `comment`) VALUES (?,?,?,?)';
     $ps = $this->get('db')->prepare($query);
     $ps->execute([
         $post_id,
         $me['id'],
+        $me['account_name'],
         $params['comment']
     ]);
 
@@ -433,7 +503,8 @@ $app->get('/admin/banned', function (Request $request, Response $response) {
     }
 
     $db = $this->get('db');
-    $ps = $db->prepare('SELECT * FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC');
+    //$ps = $db->prepare('SELECT * FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC');
+    $ps = $db->prepare('SELECT * FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `id` DESC');
     $ps->execute();
     $users = $ps->fetchAll(PDO::FETCH_ASSOC);
 
@@ -474,13 +545,15 @@ $app->get('/@{account_name}', function (Request $request, Response $response, $a
         return $response->withStatus(404)->write('404');
     }
 
-    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC');
+    //$ps = $db->prepare('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC LIMIT ' . POSTS_PER_PAGE);
+    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` WHERE `user_id` = ? ORDER BY `id` DESC LIMIT ' . POSTS_PER_PAGE);
     $ps->execute([$user['id']]);
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
     $posts = $this->get('helper')->make_posts($results);
 
     $comment_count = $this->get('helper')->fetch_first('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?', $user['id'])['count'];
 
+    /*
     $ps = $db->prepare('SELECT `id` FROM `posts` WHERE `user_id` = ?');
     $ps->execute([$user['id']]);
     $post_ids = array_column($ps->fetchAll(PDO::FETCH_ASSOC), 'id');
@@ -491,6 +564,10 @@ $app->get('/@{account_name}', function (Request $request, Response $response, $a
         $placeholder = implode(',', array_fill(0, count($post_ids), '?'));
         $commented_count = $this->get('helper')->fetch_first("SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ({$placeholder})", ...$post_ids)['count'];
     }
+    */
+
+    $post_count = $this->get('helper')->fetch_first('SELECT COUNT(*) AS count FROM `posts` WHERE `user_id` = ?', $user['id'])['count'];
+    $commented_count = $this->get('helper')->fetch_first('SELECT COUNT(*) AS count FROM `comments` INNER JOIN `posts` ON `comments`.`post_id` = `posts`.`id` WHERE `posts`.`user_id` = ?', $user['id'])['count'];
 
     $me = $this->get('helper')->get_session_user();
 
